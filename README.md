@@ -51,7 +51,7 @@ python main.py
 
 ## 使用示例
 
-```
+````
 > 帮我写一个 Python 的快速排序函数
 
 Assistant: 这是快速排序的实现：
@@ -78,7 +78,7 @@ Assistant:
 已创建 src/utils.py 文件。
 
 [Completed: completed] Turns: 1
-```
+````
 
 ## 命令
 
@@ -116,22 +116,24 @@ mini_claude_code/
 
 ### 1. 启动链路：从 `python main.py` 到我开始"说话"
 
-```
-main.py:main()
-  → SessionState.init()              # 进程级单例初始化
-  → QueryConfig.from_env()           # 从环境变量读取配置快照
-  → build_system_prompt()            # 组装 system prompt（包含工具定义）
-  → AgentLoop(config, deps).run()    # 进入 AsyncGenerator 循环
-    → while True:
-        → llm.chat(messages)          # 调用 LLM API（OpenAI 兼容协议）
-        → yield event                 # 流式返回事件
-        → 解析 LLM 响应（文本 / tool_use）
-        → if tool_use:
-            → ToolOrchestrator.run_tools()  # 并发+串行分区执行工具
-            → 工具结果注入 messages
-        → ContextCompactor.check()    # 检查是否需要压缩
-        → 检查 stop_reason
-        → 继续循环 或 'completed'
+```mermaid
+graph TD
+    A["main.py:main()"] --> B["SessionState.init()<br/>进程级单例初始化"]
+    B --> C["QueryConfig.from_env()<br/>从环境变量读取配置快照"]
+    C --> D["build_system_prompt()<br/>组装 system prompt（含工具定义）"]
+    D --> E["AgentLoop(config, deps).run()<br/>进入 AsyncGenerator 循环"]
+    E --> F["while True"]
+    F --> G["llm.chat(messages)<br/>调用 LLM API"]
+    G --> H["yield event<br/>流式返回事件"]
+    H --> I["解析 LLM 响应"]
+    I --> J{"有 tool_use?"}
+    J -->|是| K["ToolOrchestrator.run_tools()<br/>并发+串行分区执行"]
+    K --> L["工具结果注入 messages"]
+    L --> M["ContextCompactor.check()<br/>检查是否需要压缩"]
+    J -->|否| M
+    M --> N{"检查 stop_reason"}
+    N -->|继续| F
+    N -->|完成| O["'completed'"]
 ```
 
 关键洞察：**我本质上是一个 `while True` 循环**，每次迭代做三件事 — 调用 LLM → 执行工具 → 检查是否需要压缩。这是 Claude Code 最核心的设计。
@@ -184,12 +186,14 @@ main.py:main()
 
 `prompt.py` 分 5 层构建 system prompt：
 
-```
-Layer 1: 角色定义       → "You are an interactive agent..."
-Layer 2: 行为规则       → "How to Work": 代码风格、操作规则
-Layer 3: 工具清单       → 动态注入可用工具列表及参数 schema
-Layer 4: 环境信息       → 工作目录、平台、模型名、日期
-Layer 5: 记忆注入       → 从 .memory/ 文件加载持久化记忆
+```mermaid
+graph TD
+    L1["Layer 1: 角色定义<br/>'You are an interactive agent...'"]
+    L2["Layer 2: 行为规则<br/>'How to Work': 代码风格、操作规则"]
+    L3["Layer 3: 工具清单<br/>动态注入可用工具列表及参数 schema"]
+    L4["Layer 4: 环境信息<br/>工作目录、平台、模型名、日期"]
+    L5["Layer 5: 记忆注入<br/>从 .memory/ 文件加载持久化记忆"]
+    L1 --> L2 --> L3 --> L4 --> L5
 ```
 
 Memory 被注入到 system prompt 的末尾，这意味着**跨会话的记忆会自动影响后续对话的行为**。
