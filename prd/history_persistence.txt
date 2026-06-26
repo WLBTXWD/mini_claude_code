@@ -1,0 +1,182 @@
+我需要你按照claude风格实现历史消息记录持久化保存。
+历史记录保存位置：保存在当前项目下的.mini_claude_code文件中，以sessionId命名的.jsonl文件
+历史记录结构如下：
+{
+    "parentUuid": uuid
+    "type": user 或者 assistant
+    "message": 一个message列表
+    "uuid": uuid
+    "timestamp": timestamp
+    "sessionId": sessionId
+}
+
+如果"type"是"assistant",记录结构如下：
+有三种类型，分别是thinking，text，tool_use
+{
+    "parentUuid": "6bf32819-3daa-4a3e-b8a7-4918c99588f9",
+    "message": {
+        "id": "7121bb86-1018-4e8f-9895-4269f679d1a5",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-v4-pro",
+        "content": [
+            {
+                "type": "thinking",
+                "thinking": "xxxxx",
+                "signature": "7121bb86-1018-4e8f-9895-4269f679d1a5"
+            }
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 216,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 30464,
+            "output_tokens": 1205,
+            "server_tool_use": {
+                "web_search_requests": 0,
+                "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard"
+        },
+        "stop_details": null
+    },
+    "type": "assistant",
+    "uuid": "138d11c2-1516-4008-b146-065b8da214fd",
+    "timestamp": "2026-06-18T08:28:38.406Z",
+    "sessionId": "52a2b49f-9d27-40a6-8aff-c6b84389e42f"
+}
+
+{
+    "parentUuid": "138d11c2-1516-4008-b146-065b8da214fd",
+    "message": {
+        "id": "7121bb86-1018-4e8f-9895-4269f679d1a5",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-v4-pro",
+        "content": [
+            {
+                "type": "text",
+                "text": "xxx"
+            }
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 216,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 30464,
+            "output_tokens": 1205,
+            "server_tool_use": {
+                "web_search_requests": 0,
+                "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard"
+        },
+        "stop_details": null
+    },
+    "type": "assistant",
+    "uuid": "ace24a40-592e-4ff8-9078-acd5448aac9a",
+    "timestamp": "2026-06-18T08:28:39.998Z",
+    "sessionId": "52a2b49f-9d27-40a6-8aff-c6b84389e42f"
+}
+
+{
+    "parentUuid": "ace24a40-592e-4ff8-9078-acd5448aac9a",
+    "message": {
+        "id": "7121bb86-1018-4e8f-9895-4269f679d1a5",
+        "type": "message",
+        "role": "assistant",
+        "model": "deepseek-v4-pro",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_00_rnHyAgE43iSHkgRuPQxS8881",
+                "name": "Write",
+                "input": {
+                    "file_path": "D:\\study\\agentProj\\claude_usage\\chat-transcript-lesson-01.md",
+                    "content": "xxxxx"
+                }
+            }
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 216,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 30464,
+            "output_tokens": 1205,
+            "server_tool_use": {
+                "web_search_requests": 0,
+                "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "",
+            "iterations": [],
+            "speed": "standard"
+        },
+        "stop_details": null
+    },
+    "type": "assistant",
+    "uuid": "67645c8f-0c6a-4201-8ffa-e45b93f3337b",
+    "timestamp": "2026-06-18T08:28:52.821Z",
+    "sessionId": "52a2b49f-9d27-40a6-8aff-c6b84389e42f"
+}
+
+
+如果type是user，有两种
+第一种是用户发送的消息
+{
+    "parentUuid": "b9a9d565-b05b-42c3-87e6-de1a642dbca8",
+    "type": "user",
+    "message": {
+        "role": "user",
+        "content": "我想把我们的聊天记录都导出来，这个可以吗"
+    },
+    "uuid": "6bf32819-3daa-4a3e-b8a7-4918c99588f9",
+    "timestamp": "2026-06-18T08:28:30.783Z",
+    "sessionId": "52a2b49f-9d27-40a6-8aff-c6b84389e42f"
+}
+
+第二种是工具执行结果，工具执行结果的外层type包装成user类型
+{
+    "parentUuid": "67645c8f-0c6a-4201-8ffa-e45b93f3337b",
+    "type": "user",
+    "message": {
+        "role": "user",
+        "content": [
+            {
+                "tool_use_id": "call_00_rnHyAgE43iSHkgRuPQxS8881",
+                "type": "tool_result",
+                "content": "File created successfully at: D:\\study\\agentProj\\claude_usage\\chat-transcript-lesson-01.md (file state is current in your context — no need to Read it back)"
+            }
+        ]
+    },
+    "uuid": "2ecd57a8-159a-447c-a007-a3c859cdcba3",
+    "timestamp": "2026-06-18T08:28:52.860Z",
+    "toolUseResult": {
+        "type": "create",
+        "filePath": "D:\\study\\agentProj\\claude_usage\\chat-transcript-lesson-01.md",
+        "content": "xxxxx"
+    },
+    "sourceToolAssistantUUID": "67645c8f-0c6a-4201-8ffa-e45b93f3337b",
+    "sessionId": "52a2b49f-9d27-40a6-8aff-c6b84389e42f",
+}

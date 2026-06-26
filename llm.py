@@ -111,12 +111,14 @@ class LLMClient:
         }
         if tools:
             kwargs["tools"] = tools
+        kwargs["stream_options"] = {"include_usage": True}
 
         stream = await self.client.chat.completions.create(**kwargs)
 
         accumulated_content = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
         finish_reason = None
+        usage: dict[str, Any] = {}
 
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -124,6 +126,13 @@ class LLMClient:
                 continue
 
             finish_reason = chunk.choices[0].finish_reason or finish_reason
+
+            # Capture usage from last chunk
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage = {
+                    "input_tokens": chunk.usage.prompt_tokens or 0,
+                    "output_tokens": chunk.usage.completion_tokens or 0,
+                }
 
             # 累积文本
             if delta.content:
@@ -169,6 +178,8 @@ class LLMClient:
             "content": accumulated_content,
             "tool_calls": final_tool_calls,
             "stop_reason": finish_reason,
+            "usage": usage,
+            "model": self.model,
         }
 
     def _build_messages(

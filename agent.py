@@ -11,6 +11,7 @@ while True:
 基于 AsyncGenerator 模式，yield 中间事件，return 最终状态。
 """
 import json
+import uuid as uuid_mod
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Literal, Optional
 
@@ -19,6 +20,7 @@ from tools import get_all_tools
 from compact import ContextCompactor
 from query_config import QueryConfig
 from state import get_session
+from history import HistoryStore
 
 
 @dataclass
@@ -56,22 +58,26 @@ class AgentLoop:
     - 流式模型调用：实时输出 to 用户
     """
 
-    def __init__(self, llm_client: Any):
+    def __init__(self, llm_client: Any, history_store: HistoryStore | None = None):
         self.llm = llm_client
         self.orchestrator = ToolOrchestrator()
         self.compactor = ContextCompactor()
         self.session = get_session()
+        self.history = history_store
 
     async def run(
         self,
         user_message: str,
         system_context: Optional[dict[str, str]] = None,
+        initial_messages: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[Any, None]:
         """
         运行 Agent 循环
 
         Python 限制：async generator 不能 return value。
         因此最终结果通过 yield AgentResult(...) 返回，然后 bare return 退出。
+
+        initial_messages: 从历史 session 加载的消息列表 (用于 --resume)
 
         用法:
             async for event in agent.run("帮我写一个函数"):
@@ -89,9 +95,21 @@ class AgentLoop:
         )
 
         # 初始状态
-        state = AgentState(
-            messages=[{"role": "user", "content": user_message}],
-        )
+        if initial_messages:
+            state = AgentState(
+                messages=initial_messages + [{"role": "user", "content": user_message}],
+            )
+        else:
+            state = AgentState(
+                messages=[{"role": "user", "content": user_message}],
+            )
+
+        # 记录用户消息到历史
+        if self.history:
+            self.history.write_user_message(
+                content=user_message,
+                session_id=config.session_id,
+            )
 
         while True:
             # ================================================
@@ -132,6 +150,8 @@ class AgentLoop:
                     tool_call_blocks = event["tool_calls"]
 
             if final_event is None:
+                if self.history:
+                    self.history.flush(config.session_id)
                 yield AgentResult(reason="model_error", error="No response from model")
                 return
 
@@ -143,6 +163,34 @@ class AgentLoop:
                 self.session.total_input_tokens += input_tokens
             if output_tokens:
                 self.session.total_output_tokens += output_tokens
+
+            # 构建 content blocks 用于历史记录 (匹配 PRD 格式)
+            content_blocks: list[dict[str, Any]] = []
+            if stream_content:
+                content_blocks.append({
+                    "type": "text",
+                    "text": stream_content,
+                })
+            for tc in tool_call_blocks:
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "input": tc["input"],
+                })
+
+            # 记录 assistant blocks 到历史
+            assistant_entries: list[Any] = []
+            if self.history and content_blocks:
+                message_id = str(uuid_mod.uuid4())
+                assistant_entries = self.history.write_assistant_blocks(
+                    message_id=message_id,
+                    model=final_event.get("model", config.model),
+                    content_blocks=content_blocks,
+                    usage=usage,
+                    stop_reason=final_event.get("stop_reason", "end_turn") or "end_turn",
+                    session_id=config.session_id,
+                )
 
             # 添加到消息历史
             assistant_content = stream_content
@@ -182,12 +230,28 @@ class AgentLoop:
                         state.messages.append(update.message)
                         yield {"type": "tool_result", "message": update.message}
 
+                        # 记录工具结果到历史
+                        if self.history:
+                            tool_use_id = update.message.get("tool_call_id", "")
+                            # 链接到对应的 assistant tool_use entry
+                            source_uuid = ""
+                            if assistant_entries:
+                                source_uuid = assistant_entries[-1].uuid
+                            self.history.write_tool_result(
+                                tool_use_id=tool_use_id,
+                                result_content=str(update.message.get("content", "")),
+                                assistant_uuid=source_uuid,
+                                session_id=config.session_id,
+                            )
+
                 state.turn_count += 1
                 state.tool_call_count += len(tool_call_blocks)
                 yield {"type": "turn_complete", "turn": state.turn_count}
 
                 # 检查 max_turns
                 if state.turn_count >= config.max_turns:
+                    if self.history:
+                        self.history.flush(config.session_id)
                     yield AgentResult(
                         reason="max_turns",
                         turn_count=state.turn_count,
@@ -210,6 +274,8 @@ class AgentLoop:
 
                 self.session.total_turns += state.turn_count
 
+                if self.history:
+                    self.history.flush(config.session_id)
                 yield AgentResult(
                     reason="completed",
                     turn_count=state.turn_count,

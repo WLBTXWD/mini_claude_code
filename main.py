@@ -3,14 +3,16 @@ CLI 入口 (对应 src/main.tsx + entrypoints/cli.tsx)
 
 解析参数，初始化会话，启动 REPL。
 """
+import argparse
 import asyncio
 import os
 import sys
 from typing import Optional
 
 from llm import LLMClient
-from agent import AgentLoop
+from agent import AgentLoop, AgentResult
 from state import get_session, reset_session
+from history import get_history_store, HistoryStore
 
 
 # ============================================================
@@ -62,13 +64,15 @@ def _find_project_root(start_path: str) -> str:
 # REPL 主循环
 # ============================================================
 
-async def repl_loop():
+async def repl_loop(history: HistoryStore | None = None):
     """REPL 主循环 (对应 REPL.tsx 的交互模式)"""
     print("=" * 60)
     print("  Mini Claude Code — Python Implementation")
     print("  Based on Claude Code 2.1.88 architecture analysis")
     print(f"  Model: {get_session().model}")
     print(f"  CWD: {get_session().cwd}")
+    if history:
+        print(f"  Session: {get_session().session_id[:8]}...")
     print("  Type 'exit' or 'quit' to exit, '/help' for commands")
     print("=" * 60)
     print()
@@ -82,7 +86,7 @@ async def repl_loop():
         model=session.model,
         verify_ssl=verify_ssl,
     )
-    agent = AgentLoop(llm)
+    agent = AgentLoop(llm, history_store=history)
 
     # 加载系统上下文
     system_context = _get_system_context()
@@ -90,8 +94,10 @@ async def repl_loop():
         print(f"[System] Loaded context: {list(system_context.keys())}")
     print()
 
-    # 消息历史（跨轮次持久化）
-    conversation_history: list[dict] = []
+    # 从当前 session 历史加载上下文消息 (用于跨轮次上下文)
+    session_messages: list[dict] = []
+    if history:
+        session_messages = history.get_messages_for_model(session.session_id)
 
     while True:
         try:
@@ -105,7 +111,7 @@ async def repl_loop():
 
         # 处理命令
         if user_input.startswith("/"):
-            handled = await _handle_command(user_input, agent)
+            handled = await _handle_command(user_input, agent, history)
             if handled == "exit":
                 break
             continue
@@ -114,25 +120,19 @@ async def repl_loop():
             print("Goodbye!")
             break
 
-        # 构建消息（包含历史）
-        user_message = user_input
-        if conversation_history:
-            # 注入历史摘要
-            history_text = "\n".join(
-                f"[Previous turn {i+1}]: {h.get('summary', '')}"
-                for i, h in enumerate(conversation_history[-3:])
-            )
-            user_message = f"Previous conversation:\n{history_text}\n\nNew request: {user_input}"
-
         print()  # 换行，准备显示助手回复
         print("Assistant: ", end="", flush=True)
 
-        # 运行 Agent
+        # 运行 Agent (传入历史消息作为初始上下文)
         total_output = ""
         result = None
         turn_info = ""
 
-        async for event in agent.run(user_message, system_context):
+        async for event in agent.run(
+            user_input,
+            system_context,
+            initial_messages=session_messages if session_messages else None,
+        ):
             if isinstance(event, dict):
                 if event.get("type") == "text":
                     print(event["content"], end="", flush=True)
@@ -143,36 +143,33 @@ async def repl_loop():
                     turn_info = f"  [Turn {event['turn']} complete]"
                 elif event.get("type") == "compact":
                     print(f"\n  [{event['message']}]")
-            else:
+            elif isinstance(event, AgentResult):
                 # 最终结果 (AgentResult)
                 result = event
-                if isinstance(result, dict) and "reason" in result:
-                    break
+                break
 
         print()
         if turn_info:
             print(turn_info)
 
         if result:
-            # 保存到历史
-            conversation_history.append({
-                "user": user_input[:200],
-                "assistant": total_output[:200],
-                "turns": getattr(result, "turn_count", 0),
-                "summary": f"User asked: {user_input[:100]}..., Assistant responded with {len(total_output)} chars in {getattr(result, 'turn_count', 0)} turns",
-            })
+            # 更新 session 消息 (从历史重新加载以获取最新消息)
+            if history:
+                session_messages = history.get_messages_for_model(session.session_id)
             print(f"\n[Completed: {getattr(result, 'reason', '?')}] "
                   f"Turns: {getattr(result, 'turn_count', 0)}")
             print(f"Tokens: {session.total_input_tokens} in / {session.total_output_tokens} out")
         print()
 
 
-async def _handle_command(cmd: str, agent: AgentLoop) -> Optional[str]:
+async def _handle_command(cmd: str, agent: AgentLoop, history: HistoryStore | None = None) -> Optional[str]:
     """处理斜杠命令"""
     parts = cmd.split()
     command = parts[0].lower()
 
     if command in ("/exit", "/quit"):
+        if history:
+            history.flush_all()
         print("Goodbye!")
         return "exit"
 
@@ -182,15 +179,21 @@ Available commands:
   /help          - Show this help
   /clear         - Clear conversation and reset session
   /compact       - Manually compact conversation context
-  /memory        - Show memory directory and contents
+  /memory        - Show memory directory and saved sessions
   /model <name>  - Switch model (next session)
   /cost          - Show token usage and cost
   /exit          - Exit
 """)
     elif command == "/clear":
+        session = get_session()
+        old_id = session.session_id
+        if history:
+            history.flush(old_id)
         reset_session()
         load_config()
-        print("Session cleared.")
+        if history:
+            history.reset_tail()
+        print(f"Session cleared. Previous session saved as {old_id[:8]}...")
     elif command == "/compact":
         print("Compacting context...")
         # compaction is handled automatically by agent loop
@@ -207,6 +210,16 @@ Available commands:
             print(mem.format_memory_manifest(memories))
         else:
             print("No memories found.")
+        # 同时显示会话历史
+        if history:
+            sessions = history.list_sessions()
+            if sessions:
+                print(f"\n--- Saved Sessions ({len(sessions)} total) ---")
+                for s in sessions[:5]:
+                    sid = s['sessionId'][:8]
+                    count = s['messageCount']
+                    preview = s['lastMessage'][:80]
+                    print(f"  {sid}...  {count} msgs  |  {preview}")
     elif command == "/cost":
         session = get_session()
         print(f"Input tokens:  {session.total_input_tokens:,}")
@@ -263,17 +276,108 @@ def _get_system_context() -> dict[str, str]:
 
 
 # ============================================================
+# CLI 辅助
+# ============================================================
+
+def _list_sessions_cmd(history: HistoryStore):
+    """列出所有历史会话"""
+    sessions = history.list_sessions()
+    if not sessions:
+        print("No saved sessions found.")
+        return
+    print(f"{'Session ID':<38} {'Msgs':>5}  {'Last Updated':<22}  Preview")
+    print("-" * 100)
+    for s in sessions:
+        sid = s['sessionId'][:36]
+        count = s['messageCount']
+        ts = s['lastTimestamp'][:19].replace("T", " ") if s['lastTimestamp'] else "N/A"
+        preview = s['lastMessage'][:60]
+        print(f"{sid:<38} {count:>5}  {ts:<22}  {preview}")
+
+
+def _do_resume(session_arg: str, history: HistoryStore):
+    """加载指定 session 用于 resume"""
+    session = get_session()
+
+    if session_arg == "__LATEST__":
+        sessions = history.list_sessions()
+        if not sessions:
+            print("No saved sessions found. Starting fresh.")
+            return
+        session_id = sessions[0]["sessionId"]
+        print(f"Resuming latest session: {session_id[:8]}...")
+    else:
+        session_id = session_arg
+
+    entries = history.load_session(session_id)
+    if not entries:
+        print(f"Session {session_id[:8]}... not found or empty. Starting fresh.")
+        return
+
+    # 恢复链尾以继续追加
+    history.init_tail(session_id)
+
+    # 设置 session 状态
+    session.resume_session_id = session_id
+    session.session_id = session_id
+
+    # 加载消息供 Agent 使用
+    resume_messages = history.get_messages_for_model(session_id)
+    session._resume_messages = resume_messages  # type: ignore[attr-defined]
+
+    print(f"Resumed session {session_id[:8]}... ({len(resume_messages)} messages loaded)")
+
+
+# ============================================================
 # 入口
 # ============================================================
 
 def main():
     """主入口"""
+    parser = argparse.ArgumentParser(
+        description="Mini Claude Code — Python Implementation",
+    )
+    parser.add_argument(
+        "--resume", type=str, nargs="?", const="__LATEST__",
+        help="Resume a previous session (default: latest)",
+    )
+    parser.add_argument(
+        "--list-sessions", action="store_true",
+        help="List all saved sessions and exit",
+    )
+    parser.add_argument(
+        "--session", type=str,
+        help="Specify a custom session ID",
+    )
+    args = parser.parse_args()
+
     load_config()
 
+    # 初始化 HistoryStore
+    session = get_session()
+    history = get_history_store(session.project_root or session.cwd)
+
+    # 自定义 session ID
+    if args.session:
+        session.session_id = args.session
+        history.reset_tail()
+
+    # --list-sessions
+    if args.list_sessions:
+        _list_sessions_cmd(history)
+        return
+
+    # --resume
+    if args.resume:
+        _do_resume(args.resume, history)
+
     try:
-        asyncio.run(repl_loop())
+        asyncio.run(repl_loop(history))
     except KeyboardInterrupt:
         print("\nInterrupted. Goodbye!")
+    finally:
+        # 确保所有缓冲写入磁盘
+        history.dispose()
 
 
 if __name__ == "__main__":

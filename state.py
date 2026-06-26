@@ -11,7 +11,8 @@ from typing import Optional
 @dataclass
 class SessionState:
     """会话级全局状态"""
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    resume_session_id: Optional[str] = None
     cwd: str = ""
     project_root: str = ""
     total_cost_usd: float = 0.0
