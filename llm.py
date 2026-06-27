@@ -116,6 +116,7 @@ class LLMClient:
         stream = await self.client.chat.completions.create(**kwargs)
 
         accumulated_content = ""
+        accumulated_thinking = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
         finish_reason = None
         usage: dict[str, Any] = {}
@@ -132,6 +133,15 @@ class LLMClient:
                 usage = {
                     "input_tokens": chunk.usage.prompt_tokens or 0,
                     "output_tokens": chunk.usage.completion_tokens or 0,
+                }
+
+            # 累积 thinking / reasoning 内容 (DeepSeek R1 等推理模型)
+            reasoning = getattr(delta, 'reasoning_content', None)
+            if reasoning:
+                accumulated_thinking += reasoning
+                yield {
+                    "type": "thinking_delta",
+                    "text": reasoning,
                 }
 
             # 累积文本
@@ -176,6 +186,7 @@ class LLMClient:
         yield {
             "type": "final",
             "content": accumulated_content,
+            "thinking": accumulated_thinking,
             "tool_calls": final_tool_calls,
             "stop_reason": finish_reason,
             "usage": usage,

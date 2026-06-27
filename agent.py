@@ -128,11 +128,9 @@ class AgentLoop:
             tool_schemas = [t.to_openai_schema() for t in tools]
 
             stream_content = ""
+            stream_thinking = ""
             tool_call_blocks: list[dict[str, Any]] = []
             final_event = None
-
-            # 用于显示消息内容,避免发送给模型
-            display_content = ""
 
             async for event in self.llm.chat_completion_stream(
                 messages=state.messages,
@@ -140,13 +138,16 @@ class AgentLoop:
                 tools=tool_schemas,
                 max_tokens=config.max_output_tokens,
             ):
-                if event["type"] == "text_delta":
-                    display_content += event["text"]
+                if event["type"] == "thinking_delta":
+                    stream_thinking += event["text"]
+                    yield {"type": "thinking", "content": event["text"]}
+                elif event["type"] == "text_delta":
                     # 流式输出给用户
                     yield {"type": "text", "content": event["text"]}
                 elif event["type"] == "final":
                     final_event = event
                     stream_content = event["content"]
+                    stream_thinking = event.get("thinking", stream_thinking)
                     tool_call_blocks = event["tool_calls"]
 
             if final_event is None:
@@ -166,6 +167,12 @@ class AgentLoop:
 
             # 构建 content blocks 用于历史记录 (匹配 PRD 格式)
             content_blocks: list[dict[str, Any]] = []
+            if stream_thinking:
+                content_blocks.append({
+                    "type": "thinking",
+                    "thinking": stream_thinking,
+                    "signature": str(uuid_mod.uuid4()),
+                })
             if stream_content:
                 content_blocks.append({
                     "type": "text",

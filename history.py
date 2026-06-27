@@ -349,9 +349,12 @@ class HistoryStore:
         """将缓存的 assistant blocks 合并为 LLM 格式并追加到 result"""
         for msg_id, blocks in pending_blocks.items():
             text_content = None
+            thinking_content = None
             tool_calls = []
             for block in blocks:
-                if block.get("type") == "text":
+                if block.get("type") == "thinking":
+                    thinking_content = block.get("thinking", "")
+                elif block.get("type") == "text":
                     text_content = block.get("text", "")
                 elif block.get("type") == "tool_use":
                     tool_calls.append({
@@ -366,6 +369,8 @@ class HistoryStore:
                 "role": "assistant",
                 "content": text_content,
             }
+            if thinking_content:
+                clean_msg["_thinking"] = thinking_content
             if tool_calls:
                 clean_msg["tool_calls"] = tool_calls
             result.append(clean_msg)

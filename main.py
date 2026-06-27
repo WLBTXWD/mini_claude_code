@@ -145,7 +145,22 @@ async def repl_loop(history: HistoryStore | None = None):
             initial_messages=session_messages if session_messages else None,
         ):
             if isinstance(event, dict):
-                if event.get("type") == "text":
+                if event.get("type") == "thinking":
+                    chunk = event["content"]
+                    while chunk:
+                        if at_line_start:
+                            print("\033[0;37mThinking:\033[0m ", end="", flush=True)
+                            at_line_start = False
+                        nl = chunk.find("\n")
+                        if nl == -1:
+                            print(f"\033[0;37m{chunk}\033[0m", end="", flush=True)
+                            break
+                        else:
+                            before = chunk[:nl + 1]
+                            print(f"\033[0;37m{before}\033[0m", end="", flush=True)
+                            at_line_start = True
+                            chunk = chunk[nl + 1:]
+                elif event.get("type") == "text":
                     chunk = event["content"]
                     total_output += chunk
 
@@ -390,6 +405,18 @@ def _display_message_history(messages: list[dict]):
                     print(f"          {line}")
 
         elif role == "assistant":
+            # 先展示 thinking（若有）
+            thinking = m.get("_thinking", "")
+            if thinking and isinstance(thinking, str):
+                t = thinking[:800]
+                if len(thinking) > 800:
+                    t += "..."
+                for li, line in enumerate(t.split("\n")):
+                    if li == 0:
+                        print(f"  \033[0;37mThinking:\033[0m \033[0;37m{line}\033[0m")
+                    else:
+                        print(f"  \033[0;37m{line}\033[0m")
+
             # Assistant 消息：显示文本 + tool_calls
             if content and isinstance(content, str):
                 c = content[:800]
