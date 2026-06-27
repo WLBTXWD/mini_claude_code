@@ -114,6 +114,17 @@ async def repl_loop(history: HistoryStore | None = None):
             handled = await _handle_command(user_input, agent, history)
             if handled == "exit":
                 break
+            if handled == "resume":
+                # Session 已切换，重新加载上下文消息
+                if history:
+                    session_messages = history.get_messages_for_model(session.session_id)
+                    print(f"\n[Switched to session {session.session_id[:8]}... "
+                          f"— {len(session_messages)} messages]")
+                    print("─" * 60)
+                    _display_message_history(session_messages)
+                    print("─" * 60)
+                    print()
+                continue
             continue
 
         if user_input.lower() in ("exit", "quit"):
@@ -121,12 +132,12 @@ async def repl_loop(history: HistoryStore | None = None):
             break
 
         print()  # 换行，准备显示助手回复
-        print("Assistant: ", end="", flush=True)
 
         # 运行 Agent (传入历史消息作为初始上下文)
         total_output = ""
         result = None
-        turn_info = ""
+        at_line_start = True        # 下一个 text 增量需要前缀
+        is_first_line = True        # 首行用 Claude: 前缀，续行用空格缩进
 
         async for event in agent.run(
             user_input,
@@ -135,30 +146,80 @@ async def repl_loop(history: HistoryStore | None = None):
         ):
             if isinstance(event, dict):
                 if event.get("type") == "text":
-                    print(event["content"], end="", flush=True)
-                    total_output += event["content"]
+                    chunk = event["content"]
+                    total_output += chunk
+
+                    while chunk:
+                        if at_line_start:
+                            if is_first_line:
+                                print("\033[1;32mClaude:\033[0m ", end="", flush=True)
+                                is_first_line = False
+                            else:
+                                # 续行缩进 10 空格，与 _display_message_history 一致
+                                print(" " * 10, end="", flush=True)
+                            at_line_start = False
+
+                        nl = chunk.find("\n")
+                        if nl == -1:
+                            print(chunk, end="", flush=True)
+                            break
+                        else:
+                            before = chunk[:nl + 1]
+                            print(before, end="", flush=True)
+                            at_line_start = True
+                            chunk = chunk[nl + 1:]
+
                 elif event.get("type") == "tool_execution_start":
-                    print(f"\n  [Executing {event['count']} tool(s)...]")
+                    # 打印工具调用 — 与 _display_message_history 一致
+                    tool_calls = event.get("tool_calls", [])
+                    for tc in tool_calls:
+                        name = tc.get("name", "?")
+                        raw_input = tc.get("input", {})
+                        parts = []
+                        for k, v in list(raw_input.items())[:3]:
+                            vs = str(v)
+                            if "\n" in vs:
+                                parts.append(f"{k}=\n{' ' * 16}{vs.replace(chr(10), chr(10) + ' ' * 16)}")
+                            else:
+                                parts.append(f"{k}={vs}")
+                        args_str = ", ".join(parts)
+                        if len(args_str) > 300:
+                            args_str = args_str[:300] + "..."
+                        print(f"\n  \033[1;33m[Tool]\033[0m {name}({args_str})")
+                    at_line_start = True  # 工具调用后下一行 text 需要前缀
+
+                elif event.get("type") == "tool_result":
+                    msg = event.get("message", {})
+                    result_text = str(msg.get("content", ""))
+                    result_len = len(result_text)
+                    if result_text.startswith("Error") or result_text.startswith("Tool execution error"):
+                        brief = result_text[:80].replace("\n", " ")
+                        print(f"  \033[0;31m  -> [error]\033[0m {brief}")
+                    elif result_len == 0:
+                        print(f"  \033[0;34m  -> [empty]\033[0m")
+                    else:
+                        print(f"  \033[0;34m  -> [ok, {result_len} chars]\033[0m")
+                    at_line_start = True
+
                 elif event.get("type") == "turn_complete":
-                    turn_info = f"  [Turn {event['turn']} complete]"
+                    pass  # 不再打印 [Turn N complete]
+
                 elif event.get("type") == "compact":
                     print(f"\n  [{event['message']}]")
+                    at_line_start = True
+
             elif isinstance(event, AgentResult):
-                # 最终结果 (AgentResult)
                 result = event
                 break
 
         print()
-        if turn_info:
-            print(turn_info)
-
         if result:
             # 更新 session 消息 (从历史重新加载以获取最新消息)
             if history:
                 session_messages = history.get_messages_for_model(session.session_id)
-            print(f"\n[Completed: {getattr(result, 'reason', '?')}] "
-                  f"Turns: {getattr(result, 'turn_count', 0)}")
-            print(f"Tokens: {session.total_input_tokens} in / {session.total_output_tokens} out")
+            print(f"[{getattr(result, 'reason', '?')}] "
+                  f"turns: {getattr(result, 'turn_count', 0)}  |  "
+                  f"tokens: {session.total_input_tokens} in / {session.total_output_tokens} out")
         print()
 
 
@@ -178,6 +239,7 @@ async def _handle_command(cmd: str, agent: AgentLoop, history: HistoryStore | No
 Available commands:
   /help          - Show this help
   /clear         - Clear conversation and reset session
+  /resume [id]   - Resume a previous session (list if no id)
   /compact       - Manually compact conversation context
   /memory        - Show memory directory and saved sessions
   /model <name>  - Switch model (next session)
@@ -194,6 +256,78 @@ Available commands:
         if history:
             history.reset_tail()
         print(f"Session cleared. Previous session saved as {old_id[:8]}...")
+    elif command == "/resume":
+        if not history:
+            print("History system not available.")
+            return None
+        sessions = history.list_sessions()
+        if not sessions:
+            print("No saved sessions found.")
+            return None
+
+        target_id: Optional[str] = None
+        if len(parts) > 1:
+            # /resume <sessionId> — 直接恢复
+            search = parts[1]
+            # 支持短 UUID 前缀匹配
+            matches = [s for s in sessions if s['sessionId'].startswith(search)]
+            if len(matches) == 1:
+                target_id = matches[0]['sessionId']
+            elif len(matches) > 1:
+                print(f"Ambiguous prefix '{search}'. Matching sessions:")
+                for m in matches:
+                    print(f"  {m['sessionId'][:36]}  {m['messageCount']} msgs  {m['lastMessage'][:60]}")
+                return None
+            else:
+                print(f"No session found with id starting with '{search}'.")
+                return None
+        else:
+            # /resume 无参数 — 列出会话让用户选择
+            print(f"{'#':>3}  {'Session ID':<38} {'Msgs':>5}  {'Preview'}")
+            print("-" * 85)
+            for i, s in enumerate(sessions[:20]):
+                sid = s['sessionId'][:36]
+                count = s['messageCount']
+                preview = s['lastMessage'][:50]
+                # 标记当前 session
+                marker = " <-- current" if s['sessionId'] == get_session().session_id else ""
+                print(f"{i+1:>3}  {sid:<38} {count:>5}  {preview}{marker}")
+            print()
+            try:
+                choice = input("Enter session number (or Enter to cancel): ").strip()
+            except (KeyboardInterrupt, EOFError):
+                return None
+            if not choice:
+                return None
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(sessions):
+                    target_id = sessions[idx]['sessionId']
+                else:
+                    print(f"Invalid number. Choose 1-{len(sessions)}.")
+                    return None
+            else:
+                print("Invalid input.")
+                return None
+
+        if not target_id:
+            return None
+
+        # 不能 resume 当前 session
+        if target_id == get_session().session_id:
+            print("Already in this session.")
+            return None
+
+        # 切换 session
+        old_id = get_session().session_id
+        if history:
+            history.flush(old_id)
+        get_session().session_id = target_id
+        if history:
+            history.init_tail(target_id)
+        print(f"Switched from {old_id[:8]}... to {target_id[:8]}...")
+        print(f"({history.load_session(target_id).__len__()} messages loaded)")
+        return "resume"
     elif command == "/compact":
         print("Compacting context...")
         # compaction is handled automatically by agent loop
@@ -234,6 +368,81 @@ Available commands:
         print(f"Unknown command: {command}")
 
     return None
+
+
+def _display_message_history(messages: list[dict]):
+    """在终端渲染消息历史 (对应 Claude Code 的 resume 消息展示)"""
+    for i, m in enumerate(messages):
+        role = m.get("role", "")
+        content = m.get("content", "")
+        tool_calls = m.get("tool_calls", [])
+
+        if role == "user":
+            # 用户消息：显示原文
+            text = content if isinstance(content, str) else str(content)
+            if len(text) > 500:
+                text = text[:500] + "..."
+            # 多行缩进对齐
+            for li, line in enumerate(text.split("\n")):
+                if li == 0:
+                    print(f"  \033[1;36mYou:\033[0m  {line}")
+                else:
+                    print(f"          {line}")
+
+        elif role == "assistant":
+            # Assistant 消息：显示文本 + tool_calls
+            if content and isinstance(content, str):
+                c = content[:800]
+                if len(content) > 800:
+                    c += "..."
+                for li, line in enumerate(c.split("\n")):
+                    if li == 0:
+                        print(f"  \033[1;32mClaude:\033[0m {line}")
+                    else:
+                        print(f"          {line}")
+            if tool_calls:
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    name = func.get("name", "?")
+                    try:
+                        import json
+                        args = json.loads(func.get("arguments", "{}"))
+                    except Exception:
+                        args = {}
+                    # 完整展示参数，多行值也做缩进
+                    parts = []
+                    for k, v in list(args.items())[:3]:
+                        vs = str(v)
+                        if "\n" in vs:
+                            # 多行值：key 占一行，值缩进在后续行
+                            parts.append(f"{k}=\n{' ' * 16}{vs.replace(chr(10), chr(10) + ' ' * 16)}")
+                        else:
+                            parts.append(f"{k}={vs}")
+                    args_str = ", ".join(parts)
+                    # 工具调用行本身可能很长，截断到 300 字符
+                    if len(args_str) > 300:
+                        args_str = args_str[:300] + "..."
+                    print(f"  \033[1;33m[Tool]\033[0m {name}({args_str})")
+
+        elif role == "tool":
+            # 工具结果 → 紧凑状态标记，不展示完整内容
+            result_text = content if isinstance(content, str) else str(content)
+            result_len = len(result_text)
+
+            # 分类：错误 / 文件创建 / 空结果 / 普通成功
+            if result_text.startswith("Error") or result_text.startswith("Tool execution error"):
+                # 错误 — 保留前 80 字符的错误信息
+                brief = result_text[:80].replace("\n", " ")
+                print(f"  \033[0;31m  -> [error]\033[0m {brief}")
+            elif result_len == 0:
+                print(f"  \033[0;34m  -> [empty]\033[0m")
+            else:
+                # 成功 — 只显示长度，不显示内容
+                print(f"  \033[0;34m  -> [ok, {result_len} chars]\033[0m")
+
+        # 消息间空行（user 消息前加空行以分组）
+        if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
+            print()
 
 
 def _get_system_context() -> dict[str, str]:

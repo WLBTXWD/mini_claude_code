@@ -215,7 +215,7 @@ class AgentLoop:
                 # ================================================
                 # 3. 执行工具
                 # ================================================
-                yield {"type": "tool_execution_start", "count": len(tool_call_blocks)}
+                yield {"type": "tool_execution_start", "count": len(tool_call_blocks), "tool_calls": tool_call_blocks}
 
                 from tool import ToolUseContext
                 context = ToolUseContext(
