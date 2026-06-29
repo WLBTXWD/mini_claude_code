@@ -24,3 +24,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+/src_code/node_modules/
+/src_code/vendor/
+/src_code

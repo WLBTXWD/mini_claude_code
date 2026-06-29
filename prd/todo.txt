@@ -1,0 +1,12 @@
+研究工具调用、编排这块代码，看看流式调用能否实现
+compact代码需要重写
+研究claude的子agent如何调用的
+研究claude的todo任务列表
+
+接下来就是外围的内容
+harness
+权限
+文件追踪，复原
+worktree
+以及日志，追踪系统
+等等，还要深挖claude的peripheral
