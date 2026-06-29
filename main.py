@@ -15,6 +15,147 @@ from state import get_session, reset_session
 from history import get_history_store, HistoryStore
 
 
+class TerminalRenderer:
+    """Small stateful renderer for streaming and transcript messages."""
+
+    RESET = "\033[0m"
+    DIM = "\033[0;37m"
+    USER = "\033[1;36m"
+    ASSISTANT = "\033[1;32m"
+    TOOL = "\033[1;33m"
+    TOOL_OK = "\033[0;34m"
+    TOOL_ERROR = "\033[0;31m"
+
+    def __init__(self, margin: str = "  "):
+        self.margin = margin
+        self.current_block: str | None = None
+        self.at_line_start = True
+        self.block_started = False
+        self.text_started = False
+
+    def render_user(self, text: str):
+        self.close_block()
+        self.text_started = False
+        self._render_static_lines(
+            text,
+            first_prefix=f"{self.margin}{self.USER}You:{self.RESET}  ",
+            next_prefix=f"{self.margin}{' ' * 8}",
+        )
+
+    def render_thinking(self, chunk: str):
+        self._begin_block("thinking")
+        self._render_chunk(
+            chunk,
+            first_prefix=f"{self.margin}{self.DIM}Thinking:{self.RESET} ",
+            next_prefix=f"{self.margin}{self.DIM}{' ' * 10}",
+            color=self.DIM,
+        )
+
+    def render_text(self, chunk: str):
+        if self.current_block == "thinking":
+            self.close_block(blank_after=True)
+        self._begin_block("text")
+        self._render_chunk(
+            chunk,
+            first_prefix=f"{self.margin}{self.ASSISTANT}Claude:{self.RESET} ",
+            next_prefix=f"{self.margin}{' ' * 8}",
+            color=None,
+            use_first_prefix=not self.text_started,
+        )
+        if chunk:
+            self.text_started = True
+
+    def render_tool_use(self, name: str, raw_input: dict):
+        self.close_block()
+        args_str = _format_tool_args(raw_input)
+        print(f"{self.margin}{self.TOOL}[Tool]{self.RESET} {name}({args_str})")
+
+    def render_tool_result(self, result_text: str):
+        self.close_block()
+        result_len = len(result_text)
+        if result_text.startswith("Error") or result_text.startswith("Tool execution error"):
+            brief = result_text[:80].replace("\n", " ")
+            print(f"{self.margin}{self.TOOL_ERROR}  -> [error]{self.RESET} {brief}")
+        elif result_len == 0:
+            print(f"{self.margin}{self.TOOL_OK}  -> [empty]{self.RESET}")
+        else:
+            print(f"{self.margin}{self.TOOL_OK}  -> [ok, {result_len} chars]{self.RESET}")
+
+    def render_compact(self, message: str):
+        self.close_block()
+        print(f"{self.margin}[{message}]")
+
+    def close_block(self, blank_after: bool = False):
+        if self.current_block is not None and not self.at_line_start:
+            print()
+        if blank_after:
+            print()
+        self.current_block = None
+        self.at_line_start = True
+        self.block_started = False
+
+    def _begin_block(self, block: str):
+        if self.current_block == block:
+            return
+        self.close_block()
+        self.current_block = block
+        self.at_line_start = True
+        self.block_started = False
+
+    def _render_chunk(
+        self,
+        chunk: str,
+        first_prefix: str,
+        next_prefix: str,
+        color: str | None,
+        use_first_prefix: bool = True,
+    ):
+        while chunk:
+            if self.at_line_start:
+                if use_first_prefix and not self.block_started:
+                    print(first_prefix, end="", flush=True)
+                    use_first_prefix = False
+                else:
+                    print(next_prefix, end="", flush=True)
+                self.at_line_start = False
+                self.block_started = True
+
+            nl = chunk.find("\n")
+            if nl == -1:
+                text = chunk
+                chunk = ""
+            else:
+                text = chunk[:nl + 1]
+                chunk = chunk[nl + 1:]
+
+            if color:
+                print(f"{color}{text}{self.RESET}", end="", flush=True)
+            else:
+                print(text, end="", flush=True)
+
+            if text.endswith("\n"):
+                self.at_line_start = True
+
+    def _render_static_lines(self, text: str, first_prefix: str, next_prefix: str):
+        for i, line in enumerate(text.split("\n")):
+            prefix = first_prefix if i == 0 else next_prefix
+            print(f"{prefix}{line}")
+
+
+def _format_tool_args(raw_input: dict) -> str:
+    parts = []
+    for k, v in list(raw_input.items())[:3]:
+        vs = str(v)
+        if "\n" in vs:
+            parts.append(f"{k}=\n{' ' * 16}{vs.replace(chr(10), chr(10) + ' ' * 16)}")
+        else:
+            parts.append(f"{k}={vs}")
+    args_str = ", ".join(parts)
+    if len(args_str) > 300:
+        args_str = args_str[:300] + "..."
+    return args_str
+
+
 # ============================================================
 # 配置
 # ============================================================
@@ -136,8 +277,7 @@ async def repl_loop(history: HistoryStore | None = None):
         # 运行 Agent (传入历史消息作为初始上下文)
         total_output = ""
         result = None
-        at_line_start = True        # 下一个 text 增量需要前缀
-        is_first_line = True        # 首行用 Claude: 前缀，续行用空格缩进
+        renderer = TerminalRenderer()
 
         async for event in agent.run(
             user_input,
@@ -146,43 +286,11 @@ async def repl_loop(history: HistoryStore | None = None):
         ):
             if isinstance(event, dict):
                 if event.get("type") == "thinking":
-                    chunk = event["content"]
-                    while chunk:
-                        if at_line_start:
-                            print("\033[0;37mThinking:\033[0m ", end="", flush=True)
-                            at_line_start = False
-                        nl = chunk.find("\n")
-                        if nl == -1:
-                            print(f"\033[0;37m{chunk}\033[0m", end="", flush=True)
-                            break
-                        else:
-                            before = chunk[:nl + 1]
-                            print(f"\033[0;37m{before}\033[0m", end="", flush=True)
-                            at_line_start = True
-                            chunk = chunk[nl + 1:]
+                    renderer.render_thinking(event["content"])
                 elif event.get("type") == "text":
                     chunk = event["content"]
                     total_output += chunk
-
-                    while chunk:
-                        if at_line_start:
-                            if is_first_line:
-                                print("\033[1;32mClaude:\033[0m ", end="", flush=True)
-                                is_first_line = False
-                            else:
-                                # 续行缩进 10 空格，与 _display_message_history 一致
-                                print(" " * 10, end="", flush=True)
-                            at_line_start = False
-
-                        nl = chunk.find("\n")
-                        if nl == -1:
-                            print(chunk, end="", flush=True)
-                            break
-                        else:
-                            before = chunk[:nl + 1]
-                            print(before, end="", flush=True)
-                            at_line_start = True
-                            chunk = chunk[nl + 1:]
+                    renderer.render_text(chunk)
 
                 elif event.get("type") == "tool_execution_start":
                     # 打印工具调用 — 与 _display_message_history 一致
@@ -190,43 +298,23 @@ async def repl_loop(history: HistoryStore | None = None):
                     for tc in tool_calls:
                         name = tc.get("name", "?")
                         raw_input = tc.get("input", {})
-                        parts = []
-                        for k, v in list(raw_input.items())[:3]:
-                            vs = str(v)
-                            if "\n" in vs:
-                                parts.append(f"{k}=\n{' ' * 16}{vs.replace(chr(10), chr(10) + ' ' * 16)}")
-                            else:
-                                parts.append(f"{k}={vs}")
-                        args_str = ", ".join(parts)
-                        if len(args_str) > 300:
-                            args_str = args_str[:300] + "..."
-                        print(f"\n  \033[1;33m[Tool]\033[0m {name}({args_str})")
-                    at_line_start = True  # 工具调用后下一行 text 需要前缀
+                        renderer.render_tool_use(name, raw_input)
 
                 elif event.get("type") == "tool_result":
                     msg = event.get("message", {})
-                    result_text = str(msg.get("content", ""))
-                    result_len = len(result_text)
-                    if result_text.startswith("Error") or result_text.startswith("Tool execution error"):
-                        brief = result_text[:80].replace("\n", " ")
-                        print(f"  \033[0;31m  -> [error]\033[0m {brief}")
-                    elif result_len == 0:
-                        print(f"  \033[0;34m  -> [empty]\033[0m")
-                    else:
-                        print(f"  \033[0;34m  -> [ok, {result_len} chars]\033[0m")
-                    at_line_start = True
+                    renderer.render_tool_result(str(msg.get("content", "")))
 
                 elif event.get("type") == "turn_complete":
                     pass  # 不再打印 [Turn N complete]
 
                 elif event.get("type") == "compact":
-                    print(f"\n  [{event['message']}]")
-                    at_line_start = True
+                    renderer.render_compact(event["message"])
 
             elif isinstance(event, AgentResult):
                 result = event
                 break
 
+        renderer.close_block()
         print()
         if result:
             # 更新 session 消息 (从历史重新加载以获取最新消息)
@@ -387,6 +475,7 @@ Available commands:
 
 def _display_message_history(messages: list[dict]):
     """在终端渲染消息历史 (对应 Claude Code 的 resume 消息展示)"""
+    renderer = TerminalRenderer()
     for i, m in enumerate(messages):
         role = m.get("role", "")
         content = m.get("content", "")
@@ -397,75 +486,46 @@ def _display_message_history(messages: list[dict]):
             text = content if isinstance(content, str) else str(content)
             if len(text) > 500:
                 text = text[:500] + "..."
-            # 多行缩进对齐
-            for li, line in enumerate(text.split("\n")):
-                if li == 0:
-                    print(f"  \033[1;36mYou:\033[0m  {line}")
-                else:
-                    print(f"          {line}")
+            renderer.render_user(text)
+            if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
+                print()
+            continue
 
         elif role == "assistant":
-            # 先展示 thinking（若有）
             thinking = m.get("_thinking", "")
             if thinking and isinstance(thinking, str):
                 t = thinking[:800]
                 if len(thinking) > 800:
                     t += "..."
-                for li, line in enumerate(t.split("\n")):
-                    if li == 0:
-                        print(f"  \033[0;37mThinking:\033[0m \033[0;37m{line}\033[0m")
-                    else:
-                        print(f"  \033[0;37m{line}\033[0m")
+                renderer.render_thinking(t)
 
-            # Assistant 消息：显示文本 + tool_calls
             if content and isinstance(content, str):
                 c = content[:800]
                 if len(content) > 800:
                     c += "..."
-                for li, line in enumerate(c.split("\n")):
-                    if li == 0:
-                        print(f"  \033[1;32mClaude:\033[0m {line}")
-                    else:
-                        print(f"          {line}")
-            if tool_calls:
-                for tc in tool_calls:
-                    func = tc.get("function", {})
-                    name = func.get("name", "?")
-                    try:
-                        import json
-                        args = json.loads(func.get("arguments", "{}"))
-                    except Exception:
-                        args = {}
-                    # 完整展示参数，多行值也做缩进
-                    parts = []
-                    for k, v in list(args.items())[:3]:
-                        vs = str(v)
-                        if "\n" in vs:
-                            # 多行值：key 占一行，值缩进在后续行
-                            parts.append(f"{k}=\n{' ' * 16}{vs.replace(chr(10), chr(10) + ' ' * 16)}")
-                        else:
-                            parts.append(f"{k}={vs}")
-                    args_str = ", ".join(parts)
-                    # 工具调用行本身可能很长，截断到 300 字符
-                    if len(args_str) > 300:
-                        args_str = args_str[:300] + "..."
-                    print(f"  \033[1;33m[Tool]\033[0m {name}({args_str})")
+                renderer.render_text(c)
+
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                name = func.get("name", "?")
+                try:
+                    import json
+                    args = json.loads(func.get("arguments", "{}"))
+                except Exception:
+                    args = {}
+                renderer.render_tool_use(name, args)
+
+            renderer.close_block()
+            if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
+                print()
+            continue
 
         elif role == "tool":
-            # 工具结果 → 紧凑状态标记，不展示完整内容
             result_text = content if isinstance(content, str) else str(content)
-            result_len = len(result_text)
-
-            # 分类：错误 / 文件创建 / 空结果 / 普通成功
-            if result_text.startswith("Error") or result_text.startswith("Tool execution error"):
-                # 错误 — 保留前 80 字符的错误信息
-                brief = result_text[:80].replace("\n", " ")
-                print(f"  \033[0;31m  -> [error]\033[0m {brief}")
-            elif result_len == 0:
-                print(f"  \033[0;34m  -> [empty]\033[0m")
-            else:
-                # 成功 — 只显示长度，不显示内容
-                print(f"  \033[0;34m  -> [ok, {result_len} chars]\033[0m")
+            renderer.render_tool_result(result_text)
+            if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
+                print()
+            continue
 
         # 消息间空行（user 消息前加空行以分组）
         if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
