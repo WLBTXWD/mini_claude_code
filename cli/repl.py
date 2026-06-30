@@ -5,12 +5,12 @@ Extracted from main.py: repl_loop.
 from history import get_history_store
 from llm.client import LLMClient
 from core.agent import AgentLoop, AgentResult
+from core.prompt_manager import PromptManager
 from state.session import get_session
 
-from .renderer import TerminalRenderer, format_tool_args
+from .renderer import TerminalRenderer
 from .commands import handle_command
 from .display import display_message_history
-from .context import get_system_context
 
 
 async def repl_loop():
@@ -35,12 +35,12 @@ async def repl_loop():
         verify_ssl=verify_ssl,
     )
 
-    # 加载系统上下文
-    system_context = get_system_context()
-    if system_context:
-        print(f"[System] Loaded context: {list(system_context.keys())}")
+    # Build prompt context once per terminal session.
+    prompt_manager = PromptManager.from_session(session)
+    loaded_keys = prompt_manager.loaded_context_keys()
+    print(f"[System] Loaded system context: {loaded_keys['system']}")
+    print(f"[System] Loaded user context: {loaded_keys['user']}")
     print()
-
     session_messages: list[dict] = []
 
     while True:
@@ -82,10 +82,9 @@ async def repl_loop():
         result = None
         renderer = TerminalRenderer()
 
-        agent = AgentLoop(llm, history_store=history)
+        agent = AgentLoop(llm, history_store=history, prompt_manager=prompt_manager)
         async for event in agent.run(
             user_input,
-            system_context,
             initial_messages=session_messages if session_messages else None,
         ):
             if isinstance(event, dict):

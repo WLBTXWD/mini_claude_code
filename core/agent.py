@@ -19,6 +19,7 @@ from tools.orchestrator import ToolOrchestrator, MessageUpdate
 from tools.registry import get_all_tools
 from .compact import ContextCompactor
 from .query_config import QueryConfig
+from .prompt_manager import PromptManager
 from state.session import get_session
 from history.store import HistoryStore
 
@@ -58,17 +59,22 @@ class AgentLoop:
     - 流式模型调用：实时输出 to 用户
     """
 
-    def __init__(self, llm_client: Any, history_store: HistoryStore | None = None):
+    def __init__(
+        self,
+        llm_client: Any,
+        history_store: HistoryStore | None = None,
+        prompt_manager: PromptManager | None = None,
+    ):
         self.llm = llm_client
         self.orchestrator = ToolOrchestrator()
         self.compactor = ContextCompactor()
         self.session = get_session()
         self.history = history_store
+        self.prompt_manager = prompt_manager or PromptManager.from_session(self.session)
 
     async def run(
         self,
         user_message: str,
-        system_context: Optional[dict[str, str]] = None,
         initial_messages: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[Any, None]:
         """
@@ -133,8 +139,8 @@ class AgentLoop:
             final_event = None
 
             async for event in self.llm.chat_completion_stream(
-                messages=state.messages,
-                system_prompt=self._get_system_prompt(system_context),
+                messages=self.prompt_manager.prepend_user_context(state.messages),
+                system_prompt=self.prompt_manager.system_prompt,
                 tools=tool_schemas,
                 max_tokens=config.max_output_tokens,
             ):
@@ -290,20 +296,3 @@ class AgentLoop:
                 )
                 return
 
-    def _get_system_prompt(
-        self,
-        system_context: Optional[dict[str, str]] = None,
-    ) -> str | None:
-        """获取系统提示"""
-        from .prompt import build_system_prompt
-        from memory.system import MemorySystem
-
-        memory = MemorySystem(self.session.project_root or self.session.cwd)
-        memory_prompt = memory.load_memory_prompt()
-
-        return build_system_prompt(
-            cwd=self.session.cwd,
-            model=self.session.model,
-            memory_prompt=memory_prompt,
-            system_context=system_context,
-        )
