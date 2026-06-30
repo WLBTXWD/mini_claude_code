@@ -1,5 +1,6 @@
 """文件操作工具：Read, Write, Edit"""
 import os
+import time
 
 from pydantic import BaseModel, Field
 
@@ -62,6 +63,8 @@ Results show line numbers starting at 1.""",
             # 更新读取状态
             context.read_file_state[path] = {
                 "mtime": os.path.getmtime(path),
+                "timestamp": time.time(),
+                "content": output[:15000],
                 "content_preview": output[:1000],
             }
 

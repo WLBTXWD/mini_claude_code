@@ -71,6 +71,7 @@ class AgentLoop:
         self.session = get_session()
         self.history = history_store
         self.prompt_manager = prompt_manager or PromptManager.from_session(self.session)
+        self.read_file_state: dict[str, Any] = {}
 
     async def run(
         self,
@@ -119,13 +120,67 @@ class AgentLoop:
 
         while True:
             # ================================================
-            # 1. 预处理：自动压缩检查
+            # 1. 预处理：microcompact + 自动压缩检查
             # ================================================
-            if config.auto_compact_enabled and self.compactor.should_auto_compact(state.messages):
-                compacted = self.compactor.compact_messages(state.messages)
-                if compacted != state.messages:
-                    yield {"type": "compact", "message": "Context automatically compacted"}
-                    state.messages = compacted
+            if config.auto_compact_enabled:
+                before_micro_tokens = self.compactor.estimate_tokens(state.messages)
+                microcompacted, cleared_tools = self.compactor.microcompact_tool_results(state.messages)
+                if cleared_tools:
+                    state.messages = microcompacted
+                    after_micro_tokens = self.compactor.estimate_tokens(state.messages)
+                    yield {
+                        "type": "compact",
+                        "message": (
+                            "Context microcompacted "
+                            f"({cleared_tools} old tool result(s) cleared, "
+                            f"~{max(0, before_micro_tokens - after_micro_tokens)} tokens saved)"
+                        ),
+                        "cleared_tool_results": cleared_tools,
+                    }
+
+                if self.compactor.should_auto_compact(state.messages):
+                    pre_count = len(state.messages)
+
+                    async def compact_llm_call(messages: list[dict[str, Any]]) -> dict[str, Any]:
+                        return await self.llm.chat_completion(
+                            messages=messages,
+                            system_prompt="You summarize coding-agent conversations for context compaction.",
+                            tools=None,
+                            max_tokens=min(config.max_output_tokens, 16000),
+                            temperature=0.2,
+                        )
+
+                    compact_result = await self.compactor.compact_with_llm_to_messages(
+                        state.messages,
+                        compact_llm_call,
+                        self.read_file_state,
+                    )
+                    if compact_result:
+                        state.messages, result = compact_result
+                        yield {
+                            "type": "compact",
+                            "message": (
+                                "Context automatically compacted "
+                                f"({result.pre_compact_message_count} -> "
+                                f"{result.post_compact_message_count} messages, "
+                                f"restored {result.restored_file_count} file context(s))"
+                            ),
+                            "pre_message_count": result.pre_compact_message_count,
+                            "post_message_count": result.post_compact_message_count,
+                            "pre_tokens": result.pre_compact_token_count,
+                            "post_tokens": result.post_compact_token_count,
+                            "restored_file_count": result.restored_file_count,
+                        }
+                    else:
+                        yield {
+                            "type": "compact",
+                            "message": (
+                                "Context compaction skipped "
+                                f"(summary failed, {self.compactor.consecutive_failures}/"
+                                f"{self.compactor.max_consecutive_failures} failures)"
+                            ),
+                            "pre_message_count": pre_count,
+                        }
 
             # ================================================
             # 2. 调用模型 (流式)
@@ -234,6 +289,7 @@ class AgentLoop:
                 context = ToolUseContext(
                     session_id=config.session_id,
                     cwd=self.session.cwd,
+                    read_file_state=self.read_file_state,
                 )
 
                 async for update in self.orchestrator.run_tools(
